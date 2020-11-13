@@ -1,0 +1,229 @@
+
+/******************  LIBRARY SECTION *************************************/
+#include <ESP8266WiFi.h>
+#include <ESP8266mDNS.h>
+#include <WiFiUdp.h>
+#include <ArduinoOTA.h>
+#include "ESP8266HTTPClient.h"
+
+/*****************  WIFI AND CLOUDMQTT SETUP *****************************/
+const char* ssid = "CranbrerryVodka";
+const char* password = "makersmarkers";
+const char* host0 = "192.168.68.128";
+const char* host1 = "192.168.68.128";
+/***************** DECLARATIONS  ****************************************/
+WiFiClient espClient;
+/*****************  GLOBAL VARIABLES  ************************************/
+//const int ledPin = 4; //marked as D2 on the board; 
+
+const int numOfButtons=6; //includes switches
+
+const int button[numOfButtons] = {
+  5, // D1(gpio5);red button
+  4, // D2(gpio4);green button
+  0, // D3(gpio0);blue button
+  2, // D4(gpio2);clear button - special Effects
+  14, // D5; switch, brightness
+  12 // D6; switch, effect intensity
+};
+int buttonState[numOfButtons] = { 1,1,1,1,1,1 }; //natural state of the button, since we are using pullup then the natural state is high
+const int buttonIsMomentary[numOfButtons] = { 1,1,1,1,0,0 }; //1 for momentary, 0 for on/off
+const char colorAssigned[numOfButtons] = {'R','G','B','Z','Z','Z'}; // only necessary for the RGB, define colors in order of button listing above
+
+int colInt[numOfButtons] = {0,0,0,0,0,0};
+unsigned long lastChangeTime[numOfButtons]={ millis(),millis(),millis(),millis(),millis(),millis() };
+int inProgressStIntensity=0;
+
+bool boot = true;
+/*****************  SYSTEM FUNCTIONS  *************************************/
+void setup_ota(){
+    ArduinoOTA.onStart([]() {
+    String type;
+    if (ArduinoOTA.getCommand() == U_FLASH) {
+      type = "sketch";
+    } else { // U_FS
+      type = "filesystem";
+    }
+
+    // NOTE: if updating FS this would be the place to unmount FS using FS.end()
+    Serial.println("Start updating " + type);
+  });
+  ArduinoOTA.onEnd([]() {
+    Serial.println("\nEnd");
+  });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) {
+      Serial.println("Auth Failed");
+    } else if (error == OTA_BEGIN_ERROR) {
+      Serial.println("Begin Failed");
+    } else if (error == OTA_CONNECT_ERROR) {
+      Serial.println("Connect Failed");
+    } else if (error == OTA_RECEIVE_ERROR) {
+      Serial.println("Receive Failed");
+    } else if (error == OTA_END_ERROR) {
+      Serial.println("End Failed");
+    }
+  });
+  ArduinoOTA.begin();
+}
+
+void setup_wifi() 
+{
+  // We start by connecting to a WiFi network
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+}
+
+/*****************  SETUP FUNCTIONS  ****************************************/
+void setup() 
+{
+  Serial.begin(115200);  
+  setup_ota();
+  
+  for(int i=0;i<numOfButtons;i++){
+    Serial.print("Listening to GPIO ");
+    Serial.println(button[i]);
+    pinMode(button[i], INPUT_PULLUP);
+    if (!buttonIsMomentary[i]){
+      buttonState[i]=digitalRead(button[i]);
+    }
+  }
+  
+}
+/*********** CUSTOM FUNCTIONS ******************/
+void isChanged(int b,int newState){ //handle any button state changes
+  if(buttonIsMomentary[b] && newState){ //if it is a momentary button and it was released
+    int pressTime=millis()-lastChangeTime[b];
+    Serial.print("Button has been released after miliseconds: ");
+    Serial.println(pressTime);
+    if(pressTime<1000){ //if it was short pressed
+      if(b==0){//if it was a button representing a primary color
+        sendCommand("&FX=0&R=255&G=0&B=0");
+        colInt[0]=255;
+        colInt[1]=0;
+        colInt[2]=0;
+      } else if(b==1){
+        sendCommand("&FX=0&R=0&G=255&B=0");
+        colInt[0]=0;
+        colInt[1]=255;
+        colInt[2]=0;
+      }else if(b==2){
+        sendCommand("&FX=0&R=0&G=0&B=255");
+        colInt[0]=0;
+        colInt[1]=0;
+        colInt[2]=255;
+      }else if(b==3){ //short press will randomly select a scene
+        sendCommand(String(String("&FX=")+String(random(0, 101))));
+      }
+    } else { //actions taken after releasing a long press
+      if (b==3){
+        sendCommand("&PL=1"); //set to preset 1
+      }
+    }
+  } else if (buttonIsMomentary[b] && !newState){ //momentary button has been pressed down but not yet released, setting the in progress baseline intensity in case it is held down
+    inProgressStIntensity=colInt[b];
+  } else if (newState){ //toggle has been turned off
+    if (b==4){
+      sendCommand("&A=75"); //dim the lights
+    } else{
+      sendCommand("&IX=75"); //low intensity
+    }
+  }else if (!newState){ //toggle has been turned on
+    if (b==4){
+      sendCommand("&A=255"); //bright lights
+    } else{
+      sendCommand("&IX=255"); //high intensity
+    }
+  }
+  lastChangeTime[b]=millis();
+  buttonState[b]=newState;
+
+  Serial.println("Recorded a new change time and button state");
+}
+void sendCommand(String cmd){
+  if (WiFi.status() == WL_CONNECTED) { //Check WiFi connection status
+     
+      HTTPClient http;  //Declare an object of class HTTPClient
+     
+      http.begin(String("http://"+String(host0)+"/win"+cmd));  //Specify request destination
+      int httpCode = http.GET();                                                                  //Send the request
+     
+      if (httpCode > 0) { //Check the returning code
+     
+        //String payload = http.getString();   //Get the request response payload
+        //Serial.println(payload);                     //Print the response payload
+        }
+    http.end();   //Close connection
+    Serial.print("Sending API Message [");
+    Serial.print(cmd);
+    Serial.println("]");
+    }
+}
+/*****************  MAIN LOOP  ****************************************/
+void loop() 
+{ 
+  ArduinoOTA.handle();
+  
+  int buttonReading;
+  for(int i=0;i<numOfButtons;i++){
+    buttonReading = digitalRead(button[i]);
+    if(buttonState[i] != buttonReading){ //a state has changed
+      Serial.print("A button/switch has changed states [gpio],[high/low],[buttonIsMomentaryBool]: ");
+      Serial.print(button[i]);
+      Serial.print(",");
+      Serial.print(buttonReading);
+      Serial.print(",");
+      Serial.println(buttonIsMomentary[i]);
+      isChanged(i,buttonReading);
+    } else if (!buttonReading && i<3 && millis()-lastChangeTime[i]>=1000 && colInt[i] != 255) { //if any of the 3 color buttons (first 3) are being held down then ease in that color
+      double proposedChange=(((millis()-lastChangeTime[i]-1000)/10000.0)*255.0)+100+inProgressStIntensity;
+      if (proposedChange>255){
+        proposedChange=255;
+      } else {
+        proposedChange=round(proposedChange);
+      }
+      if (abs(colInt[i]-proposedChange)>=5 || proposedChange==255){
+        colInt[i]=proposedChange;
+        Serial.print("A button is being held and the color intensity is being set to: ");
+        Serial.println(colInt[i]);
+        sendCommand(String("&")+String(colorAssigned[i])+String("=")+String(colInt[i]));
+      }
+    }
+  }
+  /*
+  if (buttonState == 0)
+  {
+    if (WiFi.status() == WL_CONNECTED) { //Check WiFi connection status
+     
+      HTTPClient http;  //Declare an object of class HTTPClient
+     
+      http.begin("http://192.168.68.128/win&T=2");  //Specify request destination
+      int httpCode = http.GET();                                                                  //Send the request
+     
+      if (httpCode > 0) { //Check the returning code
+     
+        String payload = http.getString();   //Get the request response payload
+        Serial.println(payload);                     //Print the response payload
+        }
+    http.end();   //Close connection
+    }
+    delay(1000);    //Send a request every 30 seconds
+  }*/
+}
