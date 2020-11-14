@@ -14,8 +14,6 @@ const char* host1 = "192.168.68.128";
 /***************** DECLARATIONS  ****************************************/
 WiFiClient espClient;
 /*****************  GLOBAL VARIABLES  ************************************/
-//const int ledPin = 4; //marked as D2 on the board; 
-
 const int numOfButtons=6; //includes switches
 
 const int button[numOfButtons] = {
@@ -30,14 +28,39 @@ int buttonState[numOfButtons] = { 1,1,1,1,1,1 }; //natural state of the button, 
 const int buttonIsMomentary[numOfButtons] = { 1,1,1,1,0,0 }; //1 for momentary, 0 for on/off
 const char colorAssigned[numOfButtons] = {'R','G','B','Z','Z','Z'}; // only necessary for the RGB, define colors in order of button listing above
 
-int colInt[numOfButtons] = {0,0,0,0,0,0};
-unsigned long lastChangeTime[numOfButtons]={ millis(),millis(),millis(),millis(),millis(),millis() };
-int inProgressStIntensity=0;
+int colInt[numOfButtons] = {0,0,0,0,0,0}; //current intensity
+unsigned long lastChangeTime[numOfButtons]={ millis(),millis(),millis(),millis(),millis(),millis() }; //last press time, always current time at boot
+unsigned long priorChangeTime[numOfButtons]={ millis(),millis(),millis(),millis(),millis(),millis() }; //last press time, always current time at boot
+int inProgressStIntensity=0; //in progress intensity increase
+int currentFX=-1; //current effect, setting to -1 as it is unknown at boot
 
 bool boot = true;
-/*****************  SYSTEM FUNCTIONS  *************************************/
-void setup_ota(){
-    ArduinoOTA.onStart([]() {
+
+/*****************  SETUP FUNCTIONS  ****************************************/
+void setup() 
+{
+  Serial.begin(115200);  
+
+  // We start by connecting to a WiFi network
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+  //end stock WiFi code
+
+  // Start stock OTA code
+  ArduinoOTA.onStart([]() {
     String type;
     if (ArduinoOTA.getCommand() == U_FLASH) {
       type = "sketch";
@@ -69,33 +92,7 @@ void setup_ota(){
     }
   });
   ArduinoOTA.begin();
-}
-
-void setup_wifi() 
-{
-  // We start by connecting to a WiFi network
-  Serial.println();
-  Serial.print("Connecting to ");
-  Serial.println(ssid);
-
-  WiFi.begin(ssid, password);
-
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  
-  Serial.println("");
-  Serial.println("WiFi connected");
-  Serial.println("IP address: ");
-  Serial.println(WiFi.localIP());
-}
-
-/*****************  SETUP FUNCTIONS  ****************************************/
-void setup() 
-{
-  Serial.begin(115200);  
-  setup_ota();
+  //end stock OTA code
   
   for(int i=0;i<numOfButtons;i++){
     Serial.print("Listening to GPIO ");
@@ -114,27 +111,38 @@ void isChanged(int b,int newState){ //handle any button state changes
     Serial.print("Button has been released after miliseconds: ");
     Serial.println(pressTime);
     if(pressTime<1000){ //if it was short pressed
-      if(b==0){//if it was a button representing a primary color
-        sendCommand("&FX=0&R=255&G=0&B=0");
-        colInt[0]=255;
-        colInt[1]=0;
-        colInt[2]=0;
-      } else if(b==1){
-        sendCommand("&FX=0&R=0&G=255&B=0");
-        colInt[0]=0;
-        colInt[1]=255;
-        colInt[2]=0;
-      }else if(b==2){
-        sendCommand("&FX=0&R=0&G=0&B=255");
-        colInt[0]=0;
-        colInt[1]=0;
-        colInt[2]=255;
-      }else if(b==3){ //short press will randomly select a scene
-        sendCommand(String(String("&FX=")+String(random(0, 101))));
+      if(millis()-priorChangeTime[b]>500){ //single press
+        if(b==0){//if it was a button representing a primary color
+          sendCommand("&FX=0&R=255&G=0&B=0&R2=0&G2=255&B2=0");
+          currentFX=0;
+          colInt[0]=255;
+          colInt[1]=0;
+          colInt[2]=0;
+        } else if(b==1){
+          sendCommand("&FX=0&R=0&G=255&B=0&R2=0&G2=0&B2=255");
+          currentFX=0;
+          colInt[0]=0;
+          colInt[1]=255;
+          colInt[2]=0;
+        }else if(b==2){
+          sendCommand("&FX=0&R=0&G=0&B=255&R2=255&G2=0&B2=0");
+          currentFX=0;
+          colInt[0]=0;
+          colInt[1]=0;
+          colInt[2]=255;
+        }else if(b==3){ //short press will randomly select a scene
+          randomEffect();
+        }
+      }else{ //double press action
+        if(b==3){
+          sendCommand("&PL=1"); //set to preset 1
+        }
       }
     } else { //actions taken after releasing a long press
       if (b==3){
-        sendCommand("&PL=1"); //set to preset 1
+        randomEffect();
+      } else if (b<3) { //set light back to solid
+        fX(0);
       }
     }
   } else if (buttonIsMomentary[b] && !newState){ //momentary button has been pressed down but not yet released, setting the in progress baseline intensity in case it is held down
@@ -152,10 +160,22 @@ void isChanged(int b,int newState){ //handle any button state changes
       sendCommand("&IX=255"); //high intensity
     }
   }
+  priorChangeTime[b]=lastChangeTime[b];
   lastChangeTime[b]=millis();
   buttonState[b]=newState;
 
   Serial.println("Recorded a new change time and button state");
+}
+void randomEffect(){
+  int proposedEffect;
+  do{//make sure that the new effect is not the same as the one it is replacing
+    proposedEffect=random(1, 101); //starting at 1 since solid is boring
+  }while (currentFX==proposedEffect);
+  fX(proposedEffect);
+}
+void fX(int effect){
+  sendCommand(String(String("&FX=")+String(effect)));
+  currentFX=effect;
 }
 void sendCommand(String cmd){
   if (WiFi.status() == WL_CONNECTED) { //Check WiFi connection status
@@ -179,7 +199,7 @@ void sendCommand(String cmd){
 /*****************  MAIN LOOP  ****************************************/
 void loop() 
 { 
-  ArduinoOTA.handle();
+  ArduinoOTA.handle(); //stock OTA code
   
   int buttonReading;
   for(int i=0;i<numOfButtons;i++){
@@ -192,10 +212,11 @@ void loop()
       Serial.print(",");
       Serial.println(buttonIsMomentary[i]);
       isChanged(i,buttonReading);
-    } else if (!buttonReading && i<3 && millis()-lastChangeTime[i]>=1000 && colInt[i] != 255) { //if any of the 3 color buttons (first 3) are being held down then ease in that color
+    } else if (!buttonReading && i<3 && millis()-lastChangeTime[i]>=1000) { //if any of the 3 color buttons (first 3) are being held down then ease in that color - or blink that color if color is at full brightness
       double proposedChange=(((millis()-lastChangeTime[i]-1000)/10000.0)*255.0)+100+inProgressStIntensity;
       if (proposedChange>255){
         proposedChange=255;
+        fX(2); //breathe between set color and secondary color
       } else {
         proposedChange=round(proposedChange);
       }
@@ -207,23 +228,4 @@ void loop()
       }
     }
   }
-  /*
-  if (buttonState == 0)
-  {
-    if (WiFi.status() == WL_CONNECTED) { //Check WiFi connection status
-     
-      HTTPClient http;  //Declare an object of class HTTPClient
-     
-      http.begin("http://192.168.68.128/win&T=2");  //Specify request destination
-      int httpCode = http.GET();                                                                  //Send the request
-     
-      if (httpCode > 0) { //Check the returning code
-     
-        String payload = http.getString();   //Get the request response payload
-        Serial.println(payload);                     //Print the response payload
-        }
-    http.end();   //Close connection
-    }
-    delay(1000);    //Send a request every 30 seconds
-  }*/
 }
