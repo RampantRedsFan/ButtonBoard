@@ -36,6 +36,9 @@ unsigned long priorChangeTime[numOfButtons]={ millis(),millis(),millis(),millis(
 int inProgressStIntensity[numOfButtons]={ 0,0,0,0 }; //in progress intensity increase
 int numberOfConsecutivePresses[numOfButtons]={ 0,0,0,0 }; //consecutive presses, regardless of time between
 int numberOfStreamPresses[numOfButtons]={ 0,0,0,0 }; //presses on the same button within 500ms of eachother
+int recentPressesButton[50]; //log the button number of the last 50 presses, we will use this for shortcuts
+int recentPressesLength[50]; //log the length of the last 50 presses (in ms), we will use this for shortcuts
+int recentPressesCursor=-1; //log the position of the current press on the recentPresses arrays, this is used instead of moving all of the items in the arrays with every push
 int currentFX=-1; //current effect, setting to -1 as it is unknown at boot
 
 int switchState[numOfSwitches]; //will be initiated in the setup step
@@ -141,19 +144,41 @@ void randomEffect(){
   }while (currentFX==proposedEffect);
   fX(proposedEffect);
 }
+void randomColorEffect(){
+  int proposedEffect;
+  do{//make sure that the new effect is not the same as the one it is replacing
+    proposedEffect=random(1, 31); //starting at 1 since solid is boring
+  }while (currentFX==proposedEffect);
+  int potentialFX[31]={1,2,3,6,10,11,12,13,15,16,17,18,20,21,22,23,25,27,28,29,30,31,33,37,40,41,46,47,50,51,76};
+  fX(potentialFX[proposedEffect]);
+}
 void fX(int effect){
   sendCommand(String(String("&FX=")+String(effect)));
   currentFX=effect;
+}
+void pushInToRecents(int bn, int len){ //store button presses in an array
+  recentPressesCursor=(recentPressesCursor+1) % 50; //sets it back to 0 if it gets to 50
+  recentPressesButton[recentPressesCursor]=bn;
+  recentPressesLength[recentPressesCursor]=len;
+}
+int recentPressesRetrieveButton(int numBack){ //get the button pressed numBack presses ago
+  return recentPressesButton[(recentPressesCursor-numBack+50) % 50]; //added 50 and then mod 50 to first ensure that I have a positive number, then to take that number back in bounds
+}
+int recentPressesRetrieveLength(int numBack){ //get the button press length numBack presses ago
+  return recentPressesButton[(recentPressesCursor-numBack+50) % 50]; //added 50 and then mod 50 to first ensure that I have a positive number, then to take that number back in bounds
 }
 
 void buttonIsChanged(int b,int newState){ //handle any button state changes
   if(newState){ //if it is a momentary button and it was released
     int pressTime=millis()-lastChangeTime[b];
-    if(
+    pushInToRecents(b, pressTime);
     Serial.print("Button has been released after miliseconds: ");
     Serial.println(pressTime);
     if(pressTime<1000){ //if it was short pressed
-      if(millis()-priorChangeTime[b]>500){ //single press
+      if (b<3 && recentPressesRetrieveButton(1)==b){ //duplicate press on a color button, my daughter expects something to happen if she multi-taps, without this is just re-enforces the color sent
+        randomColorEffect();
+      }
+      else if(millis()-priorChangeTime[b]>500){ //single press
         if(b==0){//if it was a button representing a primary color
           sendCommand("&FX=0&R=255&G=0&B=0&R2=0&G2=255&B2=0");
           currentFX=0;
